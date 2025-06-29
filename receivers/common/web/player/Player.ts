@@ -1,6 +1,7 @@
 import { PlayMessage } from 'common/Packets';
 import dashjs from 'modules/dashjs';
 import Hls from 'modules/hls.js';
+import { WHEPClient } from './Whep';
 
 const logger = window.targetAPI.logger;
 
@@ -8,6 +9,7 @@ export enum PlayerType {
     Html,
     Dash,
     Hls,
+    Whep,
 }
 
 export class Player {
@@ -19,6 +21,8 @@ export class Player {
     public playerType: PlayerType;
     public dashPlayer: dashjs.MediaPlayerClass = null;
     public hlsPlayer: Hls = null;
+    public peerConnection: RTCPeerConnection = null;
+    public whepClient: WHEPClient = null;
 
     constructor(player: HTMLVideoElement, message: PlayMessage) {
         this.player = player;
@@ -59,10 +63,30 @@ export class Player {
 
             this.hlsPlayer = new Hls(config);
 
+        } else if (message.container === 'application/x-whep') {
+            this.playerType = PlayerType.Whep;
+            this.source = message.url;
+            this.peerConnection = new RTCPeerConnection({ bundlePolicy: "max-bundle" });
+            this.peerConnection.addTransceiver("audio");
+            this.peerConnection.addTransceiver("video");
+            this.whepClient = new WHEPClient();
         } else {
             this.playerType = PlayerType.Html;
             this.source = message.url;
         }
+    }
+
+    private destroy_html_player() {
+        this.player.src = "";
+        this.player.onerror = null;
+        this.player.onloadedmetadata = null;
+        this.player.ontimeupdate = null;
+        this.player.onplay = null;
+        this.player.onpause = null;
+        this.player.onended = null;
+        this.player.ontimeupdate = null;
+        this.player.onratechange = null;
+        this.player.onvolumechange = null;
     }
 
     public destroy() {
@@ -76,6 +100,14 @@ export class Player {
 
                 break;
 
+            case PlayerType.Whep:
+                this.whepClient.stop();
+                this.whepClient = null;
+                this.peerConnection = null;
+                this.destroy_html_player();
+
+                break;
+
             case PlayerType.Hls:
                 // HLS also uses html player
                 try {
@@ -85,20 +117,9 @@ export class Player {
                 }
                 // fallthrough
 
-            case PlayerType.Html: {
-                this.player.src = "";
-                this.player.onerror = null;
-                this.player.onloadedmetadata = null;
-                this.player.ontimeupdate = null;
-                this.player.onplay = null;
-                this.player.onpause = null;
-                this.player.onended = null;
-                this.player.ontimeupdate = null;
-                this.player.onratechange = null;
-                this.player.onvolumechange = null;
-
+            case PlayerType.Html:
+                this.destroy_html_player();
                 break;
-            }
 
             default:
                 break;
@@ -129,6 +150,13 @@ export class Player {
             this.hlsPlayer.loadSource(this.playMessage.url);
             this.hlsPlayer.attachMedia(this.player);
             // hlsPlayer.subtitleDisplay = true;
+        } else if (this.playerType == PlayerType.Whep) {
+            this.peerConnection.ontrack = (event) => {
+                if (event.track.kind == "video") {
+                    this.player.srcObject = event.streams[0];
+                }
+            }
+            this.whepClient.view(this.peerConnection, this.playMessage.url);
         } else { // HTML
             this.player.src = this.playMessage.url;
             this.player.load();
@@ -137,7 +165,6 @@ export class Player {
 
     public play() {
         logger.info("Player: play");
-
         if (this.playerType === PlayerType.Dash) {
             this.dashPlayer.play();
         } else { // HLS, HTML
